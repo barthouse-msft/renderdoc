@@ -26,6 +26,7 @@
 #include "renderdoccmd.h"
 #include <app/renderdoc_app.h>
 #include <replay/version.h>
+#include <cstdlib>
 #include <string>
 
 rdcstr conv(const std::string &s)
@@ -530,6 +531,7 @@ private:
   uint32_t width = 0;
   uint32_t height = 0;
   uint32_t loops = 0;
+  bool etw_api_calls = false;
 
 public:
   ReplayCommand() : Command() {}
@@ -543,6 +545,9 @@ public:
     parser.add<std::string>("remote-host", 0,
                             "Instead of replaying locally, replay on this host over the network.",
                             false);
+    parser.add("etw-api-calls", 'e',
+               "Emit one ETW event per D3D11 API call replayed, with the API name and thread "
+               "CPU cycles taken.");
   }
   virtual const char *Description()
   {
@@ -573,11 +578,19 @@ public:
     width = parser.get<uint32_t>("width");
     height = parser.get<uint32_t>("height");
     loops = parser.get<uint32_t>("loops");
+    etw_api_calls = parser.exist("etw-api-calls");
 
     return true;
   }
   virtual int Execute(const CaptureOptions &)
   {
+    // propagate the flag into the process environment so the renderdoc core module (which emits
+    // the D3D11Replay_ApiCall ETW events from inside d3d11_context.cpp) can check it, without
+    // needing a dedicated public API for this debug-only, Windows-only (ETW) feature.
+#if defined(_WIN32)
+    _putenv_s("RENDERDOC_ETW_D3D11_API_CALLS", etw_api_calls ? "1" : "");
+#endif
+
     if(!remote_host.empty())
     {
       std::cout << "Replaying '" << filename << "' on " << remote_host << "." << std::endl;

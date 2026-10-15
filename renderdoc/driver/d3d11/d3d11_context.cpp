@@ -32,6 +32,46 @@
 #include "d3d11_replay.h"
 #include "d3d11_resources.h"
 
+#include <TraceLoggingProvider.h>
+
+// ETW TraceLogging provider used to emit one event per D3D11 API call replayed from a capture
+// (see ProcessChunk below). Separate from renderdoccmd's own RenderDocCmd provider because this
+// code runs inside the core renderdoc module, not the renderdoccmd executable.
+TRACELOGGING_DECLARE_PROVIDER(g_hD3D11ReplayTraceLoggingProvider);
+
+// {2f5a7c3e-6b8d-4e9a-9c1f-7a3d5e8b2c41}
+TRACELOGGING_DEFINE_PROVIDER(g_hD3D11ReplayTraceLoggingProvider, "Microsoft.Windows.Graphics.D3D11Replay",
+                              (0x2f5a7c3e, 0x6b8d, 0x4e9a, 0x9c, 0x1f, 0x7a, 0x3d, 0x5e, 0x8b, 0x2c,
+                               0x41));
+
+namespace
+{
+struct D3D11ReplayTraceLoggingProviderRegistration
+{
+  D3D11ReplayTraceLoggingProviderRegistration()
+  {
+    TraceLoggingRegister(g_hD3D11ReplayTraceLoggingProvider);
+  }
+  ~D3D11ReplayTraceLoggingProviderRegistration()
+  {
+    TraceLoggingUnregister(g_hD3D11ReplayTraceLoggingProvider);
+  }
+};
+static D3D11ReplayTraceLoggingProviderRegistration g_D3D11ReplayTraceLoggingProviderRegistration;
+}
+
+// cached once per process: controlled by renderdoccmd's `--etw-api-calls` replay option, which
+// sets this environment variable before replay begins.
+static bool D3D11ReplayApiCallTracingEnabled()
+{
+  static const bool enabled = []() {
+    char buf[8] = {};
+    DWORD len = GetEnvironmentVariableA("RENDERDOC_ETW_D3D11_API_CALLS", buf, sizeof(buf));
+    return len > 0 && buf[0] == '1';
+  }();
+  return enabled;
+}
+
 WRAPPED_POOL_INST(WrappedID3D11DeviceContext);
 WRAPPED_POOL_INST(WrappedID3D11CommandList);
 
@@ -762,6 +802,12 @@ bool WrappedID3D11DeviceContext::ProcessChunk(ReadSerialiser &ser, D3D11Chunk ch
 
   bool ret = false;
 
+  const bool traceApiCall = D3D11ReplayApiCallTracingEnabled();
+
+  ULONG64 d3d11ApiCallStartCycles = 0;
+  if(traceApiCall)
+    QueryThreadCycleTime(GetCurrentThread(), &d3d11ApiCallStartCycles);
+
   switch(chunk)
   {
     case D3D11Chunk::IASetInputLayout: ret = Serialise_IASetInputLayout(ser, 0x0); break;
@@ -1017,6 +1063,19 @@ bool WrappedID3D11DeviceContext::ProcessChunk(ReadSerialiser &ser, D3D11Chunk ch
 
     // no explicit default so that we have compiler warnings if a chunk isn't explicitly handled.
     case D3D11Chunk::Max: break;
+  }
+
+  {
+    ULONG64 d3d11ApiCallEndCycles = 0;
+    if(traceApiCall)
+    {
+      QueryThreadCycleTime(GetCurrentThread(), &d3d11ApiCallEndCycles);
+
+      TraceLoggingWrite(g_hD3D11ReplayTraceLoggingProvider, "D3D11Replay_ApiCall",
+                         TraceLoggingString(ToStr(chunk).c_str(), "ApiName"),
+                         TraceLoggingUInt64(d3d11ApiCallEndCycles - d3d11ApiCallStartCycles,
+                                            "ThreadCycles"));
+    }
   }
 
   {

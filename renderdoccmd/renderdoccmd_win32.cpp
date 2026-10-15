@@ -37,6 +37,25 @@
 #include <shlobj.h>
 #include <tlhelp32.h>
 
+#include <TraceLoggingProvider.h>
+
+// clang-format off
+TRACELOGGING_DECLARE_PROVIDER(g_hRenderDocCmdTraceLoggingProvider);
+TRACELOGGING_DEFINE_PROVIDER(
+    g_hRenderDocCmdTraceLoggingProvider,
+    "Microsoft.Windows.Graphics.RenderDocCmd",
+    (0x8b7055ab, 0xe765, 0x4f16, 0x81, 0x4e, 0xca, 0x1e, 0x80, 0x51, 0xb0, 0x07));
+// clang-format on
+
+struct TraceLoggingProviderRegistration
+{
+  TraceLoggingProviderRegistration() { TraceLoggingRegister(g_hRenderDocCmdTraceLoggingProvider); }
+  ~TraceLoggingProviderRegistration()
+  {
+    TraceLoggingUnregister(g_hRenderDocCmdTraceLoggingProvider);
+  }
+};
+
 static std::string conv(const std::wstring &str)
 {
   std::string ret;
@@ -226,9 +245,21 @@ void DisplayRendererPreview(IReplayController *renderer, TextureDisplay &display
     if(msg.message == WM_QUIT)
       break;
 
-    // set to random event beyond the end of the frame to ensure output is marked as dirty
+    // set to random event beyond the end of the frame to ensure output is marked as dirty.
+    // Marks the start/end of this frame's API replay (CPU-side re-issuing of the captured
+    // D3D commands into the replay device).
+    TraceLoggingWrite(g_hRenderDocCmdTraceLoggingProvider, "RenderDocCmd_ReplayStart",
+                       TraceLoggingUInt32(loopCount, "LoopCount"));
     renderer->SetFrameEvent(10000000, true);
+    TraceLoggingWrite(g_hRenderDocCmdTraceLoggingProvider, "RenderDocCmd_ReplayEnd",
+                       TraceLoggingUInt32(loopCount, "LoopCount"));
+
+    // Marks the start/end of waiting for this frame's render (Present/output blit) to complete.
+    TraceLoggingWrite(g_hRenderDocCmdTraceLoggingProvider, "RenderDocCmd_PresentWaitStart",
+                       TraceLoggingUInt32(loopCount, "LoopCount"));
     out->Display();
+    TraceLoggingWrite(g_hRenderDocCmdTraceLoggingProvider, "RenderDocCmd_PresentWaitEnd",
+                       TraceLoggingUInt32(loopCount, "LoopCount"));
 
     Sleep(40);
 
@@ -912,6 +943,8 @@ int main(int, char *)
   LocalFree(wargv);
 
   hInstance = GetModuleHandleA(NULL);
+
+  static TraceLoggingProviderRegistration traceLoggingRegistration;
 
   WNDCLASSEX wc;
   wc.cbSize = sizeof(WNDCLASSEX);
